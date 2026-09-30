@@ -29,3 +29,33 @@ By default the buildpack adds GitHub to `known_hosts`. However you can configure
 ## SSH Key Management Strategy
 
 Because the buildpack cannot provide a password, the provided SSH key cannot be encrypted. Thus our advice to fetch private GitHub repository is to setup a GitHub Deploy Key, unencrypted and read-only only for the target repositories you want to fetch.
+
+## Additional repository-specific deploy keys
+
+The original `SSH_KEY` and `SSH_HOSTS` behavior is unchanged. This fork also
+accepts optional pairs of build environment variables:
+
+```text
+SSH_KEY_CLIENT_SDK=<Base64-encoded private key>
+SSH_KEY_CLIENT_SDK_REPOSITORY=github.com/bratelefant/planb-client-sdk.git
+```
+
+Choose any uppercase name after `SSH_KEY_`; every additional key needs its
+matching `_REPOSITORY` variable. Use an unencrypted, read-only deploy key for
+that repository. Do not include a URL scheme or username in `_REPOSITORY`.
+
+The buildpack configures an SSH host alias for each additional key and rewrites
+only the matching SSH, SCP-style and HTTPS Git URLs. Package manifests and
+lockfiles do not need to change. It verifies repository read access before the
+next buildpack runs. A missing or invalid configured key fails the build early.
+
+An absolute `GIT_CONFIG_GLOBAL` is exported to subsequent buildpacks, so the
+mapping also applies when Meteor changes `HOME` during its build. Existing Git
+configuration, unrelated repository URLs and the original `SSH_KEY` are kept.
+Additional private keys live in a temporary directory outside the app image.
+
+Local offline regression checks (Python 3, Bash, Git and OpenSSH):
+
+```sh
+python3 tests/additional_keys_test.py
+```

@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+env_dir=$1
+ssh_directory=$2
+export_file=$3
+shopt -s nullglob
+repository_files=("$env_dir"/SSH_KEY_*_REPOSITORY)
+[[ ${#repository_files[@]} -gt 0 ]] || exit 0
+
+mkdir -p "$ssh_directory"
+chmod 700 "$ssh_directory"
+
+# Meteor changes HOME during its build. All following buildpacks and their
+# subprocesses must keep using the config in the original build environment.
+export GIT_CONFIG_GLOBAL="${GIT_CONFIG_GLOBAL:-${HOME}/.gitconfig}"
+[[ "$GIT_CONFIG_GLOBAL" == /* ]] || { echo 'GIT_CONFIG_GLOBAL must be absolute.' >&2; exit 1; }
+
+for repository_file in "${repository_files[@]}"; do
+  key_name=$(basename "${repository_file%_REPOSITORY}")
+  [[ "$key_name" =~ ^SSH_KEY_[A-Z0-9_]+$ ]] || { echo 'Invalid additional SSH key name.' >&2; exit 1; }
+  repository=$(cat "$repository_file")
+  if [[ ! "$repository" =~ ^([A-Za-z0-9.-]+)/([A-Za-z0-9_./-]+\.git)$ ]]; then
+    echo "${key_name}_REPOSITORY must be a host/path/repository.git address." >&2
+    exit 1
+  fi
+  hostname=${BASH_REMATCH[1]}
+  repository_path=${BASH_REMATCH[2]}
+  host_alias="scalingo-$(printf '%s' "${key_name#SSH_KEY_}" | tr 'A-Z_' 'a-z-')"
+
+  if [[ ! -s "$env_dir/$key_name" ]]; then
+    echo "${key_name} is missing or empty." >&2
+    exit 1
+  fi
+  # Additional private keys stay outside the app directory/runtime image.
+  key_directory=$(mktemp -d -t ssh-buildpack.XXXXXX)
+  key_file="$key_directory/key"
+  if ! base64 --decode < "$env_dir/$key_name" > "$key_file" 2>/dev/null ||
+     ! ssh-keygen -y -P '' -f "$key_file" >/dev/null 2>&1; then
+    rm -rf "$key_directory"
+    echo "${key_name} must be a Base64-encoded, unencrypted private key." >&2
+    exit 1
+  fi
+  chmod 600 "$key_file"
+
+  start="# BEGIN ssh-private-key-buildpack ${key_name}"
+  end="# END ssh-private-key-buildpack ${key_name}"
+  previous_config="$key_directory/previous-config"
+  if [[ -f "$ssh_directory/config" ]]; then
+    awk -v start="$start" -v end="$end" '
+      $0 == start { skip = 1; next }
+      $0 == end { skip = 0; next }
+      !skip { print }
+    ' "$ssh_directory/config" > "$previous_config"
+  else
+    touch "$previous_config"
+  fi
+  {
+    printf '%s\n' "$start" "Host ${host_alias}" "  HostName ${hostname}" '  User git'
+    printf '  IdentityFile "%s"\n' "$key_file"
+    printf '%s\n' '  IdentitiesOnly yes' '  IdentityAgent none' '  BatchMode yes' 'Host *' "$end"
+    cat "$previous_config"
+  } > "$ssh_directory/config"
+  chmod 600 "$ssh_directory/config"
+
+  touch "$ssh_directory/known_hosts"
+  if ! ssh-keygen -F "$hostname" -f "$ssh_directory/known_hosts" >/dev/null; then
+    ssh-keyscan -H -T 10 "$hostname" >> "$ssh_directory/known_hosts"
+  fi
+  chmod 600 "$ssh_directory/known_hosts"
+
+  target="url.ssh://git@${host_alias}/${repository_path}.insteadOf"
+  git config --global --replace-all "$target" "ssh://git@${repository}"
+  git config --global --add "$target" "git@${hostname}:${repository_path}"
+  git config --global --add "$target" "https://${repository}"
+
+  if ! git ls-remote "ssh://git@${repository}" HEAD >/dev/null; then
+    echo "Read access to ${repository} with ${key_name} failed." >&2
+    exit 1
+  fi
+  echo "-----> Configured additional read access for ${repository}"
+done
+
+# multi-buildpack sources this file before starting the Node/Meteor buildpack.
+printf 'export GIT_CONFIG_GLOBAL=%q\n' "$GIT_CONFIG_GLOBAL" >> "$export_file"

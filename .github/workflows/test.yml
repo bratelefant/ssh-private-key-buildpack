@@ -1,0 +1,9 @@
+name: Buildpack tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n bin/compile bin/additional-keys
+      - run: python3 tests/additional_keys_test.py

@@ -68,7 +68,11 @@ if [ -n "${ssh_key}" ]; then
 		echo "Successfully copied SSH files to ${ssh_home}" | indent
 	fi
 
-	exit 0
 else
 	echo "-----> No SSH private key"
 fi
+
+# Keep SSH_KEY's existing behavior; additional keys are optional and repo-scoped.
+buildpack_dir="$(cd "$(dirname "$0")/.." && pwd)"
+real_ssh_home="$(getent passwd "$(whoami)" | cut -d ':' -f6)/.ssh"
+bash "$buildpack_dir/bin/additional-keys" "$ENV_DIR" "$real_ssh_home" "$buildpack_dir/export"
